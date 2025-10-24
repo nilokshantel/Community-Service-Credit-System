@@ -14,6 +14,18 @@
 (define-constant ERR_ALREADY_VALIDATED (err u105))
 (define-constant ERR_INVALID_ORGANIZATION (err u106))
 (define-constant ERR_SELF_VALIDATION (err u107))
+(define-constant ERR_BADGE_ALREADY_EARNED (err u108))
+
+(define-constant BADGE_FIRST_CONTRIBUTION u1)
+(define-constant BADGE_10_HOURS u2)
+(define-constant BADGE_50_HOURS u3)
+(define-constant BADGE_100_HOURS u4)
+(define-constant BADGE_500_HOURS u5)
+(define-constant BADGE_10_CONTRIBUTIONS u6)
+(define-constant BADGE_50_CONTRIBUTIONS u7)
+(define-constant BADGE_MULTI_ORG u8)
+(define-constant BADGE_LONG_TERM u9)
+(define-constant BADGE_REPUTATION_GOLD u10)
 
 (define-data-var next-contribution-id uint u1)
 (define-data-var next-organization-id uint u1)
@@ -66,6 +78,19 @@
     total-contributions: uint,
     last-contribution-block: uint
   }
+)
+
+(define-map volunteer-badges
+  { volunteer: principal, badge-id: uint }
+  {
+    earned: bool,
+    earned-block: uint
+  }
+)
+
+(define-map volunteer-badge-count
+  { volunteer: principal }
+  { total-badges: uint }
 )
 
 (define-public (register-organization (name (string-utf8 100)))
@@ -177,6 +202,7 @@
       )
     )
     (unwrap-panic (update-volunteer-organization-history volunteer organization-id hours))
+    (unwrap-panic (check-and-award-badges volunteer))
     (ok true)
   )
 )
@@ -238,6 +264,114 @@
       (base-score (/ (* total-hours u10) u1))
     )
     (+ base-score longevity-bonus consistency-bonus)
+  )
+)
+
+(define-private (check-and-award-badges (volunteer principal))
+  (let
+    (
+      (profile (unwrap! (map-get? volunteer-profiles { volunteer: volunteer }) (ok false)))
+      (total-hours (get total-hours profile))
+      (total-contributions (get contributions-count profile))
+      (reputation (get reputation-score profile))
+      (first-block (get first-contribution-block profile))
+      (blocks-active (- stacks-block-height first-block))
+    )
+    (if (is-eq total-contributions u1)
+      (unwrap-panic (award-badge volunteer BADGE_FIRST_CONTRIBUTION))
+      true
+    )
+    (if (>= total-hours u10)
+      (unwrap-panic (award-badge volunteer BADGE_10_HOURS))
+      true
+    )
+    (if (>= total-hours u50)
+      (unwrap-panic (award-badge volunteer BADGE_50_HOURS))
+      true
+    )
+    (if (>= total-hours u100)
+      (unwrap-panic (award-badge volunteer BADGE_100_HOURS))
+      true
+    )
+    (if (>= total-hours u500)
+      (unwrap-panic (award-badge volunteer BADGE_500_HOURS))
+      true
+    )
+    (if (>= total-contributions u10)
+      (unwrap-panic (award-badge volunteer BADGE_10_CONTRIBUTIONS))
+      true
+    )
+    (if (>= total-contributions u50)
+      (unwrap-panic (award-badge volunteer BADGE_50_CONTRIBUTIONS))
+      true
+    )
+    (if (>= (count-organizations-worked volunteer) u3)
+      (unwrap-panic (award-badge volunteer BADGE_MULTI_ORG))
+      true
+    )
+    (if (>= blocks-active u10000)
+      (unwrap-panic (award-badge volunteer BADGE_LONG_TERM))
+      true
+    )
+    (if (>= reputation u500)
+      (unwrap-panic (award-badge volunteer BADGE_REPUTATION_GOLD))
+      true
+    )
+    (ok true)
+  )
+)
+
+(define-private (award-badge (volunteer principal) (badge-id uint))
+  (let
+    (
+      (existing-badge (map-get? volunteer-badges { volunteer: volunteer, badge-id: badge-id }))
+      (current-block stacks-block-height)
+    )
+    (match existing-badge
+      badge
+      (ok false)
+      (begin
+        (map-set volunteer-badges
+          { volunteer: volunteer, badge-id: badge-id }
+          { earned: true, earned-block: current-block }
+        )
+        (let
+          (
+            (badge-count-data (map-get? volunteer-badge-count { volunteer: volunteer }))
+          )
+          (match badge-count-data
+            count-data
+            (map-set volunteer-badge-count
+              { volunteer: volunteer }
+              { total-badges: (+ (get total-badges count-data) u1) }
+            )
+            (map-set volunteer-badge-count
+              { volunteer: volunteer }
+              { total-badges: u1 }
+            )
+          )
+        )
+        (ok true)
+      )
+    )
+  )
+)
+
+(define-private (count-organizations-worked (volunteer principal))
+  (get count (fold count-org-if-worked (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 u12 u13 u14 u15 u16 u17 u18 u19 u20) { volunteer: volunteer, count: u0 }))
+)
+
+(define-private (count-org-if-worked (org-id uint) (context { volunteer: principal, count: uint }))
+  (let
+    (
+      (volunteer (get volunteer context))
+      (history (map-get? volunteer-organization-history { volunteer: volunteer, organization-id: org-id }))
+    )
+    (match history
+      h
+      { volunteer: volunteer, count: (+ (get count context) u1) }
+      context
+    )
   )
 )
 
@@ -321,6 +455,58 @@
       )
     )
     "Unregistered"
+  )
+)
+
+(define-read-only (get-volunteer-badge (volunteer principal) (badge-id uint))
+  (map-get? volunteer-badges { volunteer: volunteer, badge-id: badge-id })
+)
+
+(define-read-only (get-volunteer-total-badges (volunteer principal))
+  (match (map-get? volunteer-badge-count { volunteer: volunteer })
+    count-data (get total-badges count-data)
+    u0
+  )
+)
+
+(define-read-only (has-badge (volunteer principal) (badge-id uint))
+  (match (map-get? volunteer-badges { volunteer: volunteer, badge-id: badge-id })
+    badge (get earned badge)
+    false
+  )
+)
+
+(define-read-only (get-badge-name (badge-id uint))
+  (if (is-eq badge-id BADGE_FIRST_CONTRIBUTION)
+    "First Contribution"
+    (if (is-eq badge-id BADGE_10_HOURS)
+      "10 Hours"
+      (if (is-eq badge-id BADGE_50_HOURS)
+        "50 Hours"
+        (if (is-eq badge-id BADGE_100_HOURS)
+          "100 Hours"
+          (if (is-eq badge-id BADGE_500_HOURS)
+            "500 Hours"
+            (if (is-eq badge-id BADGE_10_CONTRIBUTIONS)
+              "10 Contributions"
+              (if (is-eq badge-id BADGE_50_CONTRIBUTIONS)
+                "50 Contributions"
+                (if (is-eq badge-id BADGE_MULTI_ORG)
+                  "Multi-Organization"
+                  (if (is-eq badge-id BADGE_LONG_TERM)
+                    "Long-Term Volunteer"
+                    (if (is-eq badge-id BADGE_REPUTATION_GOLD)
+                      "Gold Reputation"
+                      "Unknown"
+                    )
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    )
   )
 )
 
