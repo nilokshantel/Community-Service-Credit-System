@@ -15,6 +15,10 @@
 (define-constant ERR_INVALID_ORGANIZATION (err u106))
 (define-constant ERR_SELF_VALIDATION (err u107))
 (define-constant ERR_BADGE_ALREADY_EARNED (err u108))
+(define-constant ERR_APPEAL_NOT_FOUND (err u109))
+(define-constant ERR_APPEAL_ALREADY_RESOLVED (err u110))
+(define-constant ERR_CANNOT_APPEAL_VALIDATED (err u111))
+(define-constant ERR_APPEAL_ALREADY_EXISTS (err u112))
 
 (define-constant BADGE_FIRST_CONTRIBUTION u1)
 (define-constant BADGE_10_HOURS u2)
@@ -29,6 +33,7 @@
 
 (define-data-var next-contribution-id uint u1)
 (define-data-var next-organization-id uint u1)
+(define-data-var next-appeal-id uint u1)
 
 (define-map organizations
   { organization-id: uint }
@@ -91,6 +96,27 @@
 (define-map volunteer-badge-count
   { volunteer: principal }
   { total-badges: uint }
+)
+
+(define-map contribution-appeals
+  { appeal-id: uint }
+  {
+    contribution-id: uint,
+    volunteer: principal,
+    organization-id: uint,
+    reason: (string-utf8 300),
+    submission-block: uint,
+    resolved: bool,
+    resolution: (optional (string-utf8 300)),
+    resolver: (optional principal),
+    resolution-block: (optional uint),
+    approved: (optional bool)
+  }
+)
+
+(define-map contribution-appeal-lookup
+  { contribution-id: uint }
+  { appeal-id: uint }
 )
 
 (define-public (register-organization (name (string-utf8 100)))
@@ -405,6 +431,85 @@
   )
 )
 
+(define-public (submit-appeal (contribution-id uint) (reason (string-utf8 300)))
+  (let
+    (
+      (contribution (unwrap! (map-get? service-contributions { contribution-id: contribution-id }) ERR_CONTRIBUTION_NOT_FOUND))
+      (appeal-id (var-get next-appeal-id))
+      (current-block stacks-block-height)
+      (existing-appeal (map-get? contribution-appeal-lookup { contribution-id: contribution-id }))
+    )
+    (asserts! (is-eq tx-sender (get volunteer contribution)) ERR_UNAUTHORIZED)
+    (asserts! (not (get validated contribution)) ERR_CANNOT_APPEAL_VALIDATED)
+    (asserts! (> (len reason) u0) ERR_INVALID_HOURS)
+    (asserts! (is-none existing-appeal) ERR_APPEAL_ALREADY_EXISTS)
+    (map-set contribution-appeals
+      { appeal-id: appeal-id }
+      {
+        contribution-id: contribution-id,
+        volunteer: tx-sender,
+        organization-id: (get organization-id contribution),
+        reason: reason,
+        submission-block: current-block,
+        resolved: false,
+        resolution: none,
+        resolver: none,
+        resolution-block: none,
+        approved: none
+      }
+    )
+    (map-set contribution-appeal-lookup
+      { contribution-id: contribution-id }
+      { appeal-id: appeal-id }
+    )
+    (var-set next-appeal-id (+ appeal-id u1))
+    (ok appeal-id)
+  )
+)
+
+(define-public (resolve-appeal (appeal-id uint) (approved bool) (resolution-text (string-utf8 300)))
+  (let
+    (
+      (appeal (unwrap! (map-get? contribution-appeals { appeal-id: appeal-id }) ERR_APPEAL_NOT_FOUND))
+      (organization-info (unwrap! (map-get? organizations { organization-id: (get organization-id appeal) }) ERR_ORGANIZATION_NOT_FOUND))
+      (current-block stacks-block-height)
+    )
+    (asserts! (or (is-eq tx-sender (get lead organization-info)) (is-eq tx-sender CONTRACT_OWNER)) ERR_UNAUTHORIZED)
+    (asserts! (not (get resolved appeal)) ERR_APPEAL_ALREADY_RESOLVED)
+    (map-set contribution-appeals
+      { appeal-id: appeal-id }
+      (merge appeal {
+        resolved: true,
+        resolution: (some resolution-text),
+        resolver: (some tx-sender),
+        resolution-block: (some current-block),
+        approved: (some approved)
+      })
+    )
+    (if approved
+      (let
+        (
+          (contribution (unwrap! (map-get? service-contributions { contribution-id: (get contribution-id appeal) }) ERR_CONTRIBUTION_NOT_FOUND))
+          (volunteer (get volunteer appeal))
+          (hours (get hours contribution))
+        )
+        (map-set service-contributions
+          { contribution-id: (get contribution-id appeal) }
+          (merge contribution {
+            validated: true,
+            validator: (some tx-sender),
+            validation-block: (some current-block)
+          })
+        )
+        (unwrap-panic (award-credits volunteer (get organization-id appeal) hours))
+        (unwrap-panic (update-organization-stats (get organization-id appeal) volunteer hours))
+        (ok true)
+      )
+      (ok true)
+    )
+  )
+)
+
 (define-read-only (get-volunteer-profile (volunteer principal))
   (map-get? volunteer-profiles { volunteer: volunteer })
 )
@@ -507,6 +612,28 @@
         )
       )
     )
+  )
+)
+
+(define-read-only (get-appeal-details (appeal-id uint))
+  (map-get? contribution-appeals { appeal-id: appeal-id })
+)
+
+(define-read-only (get-appeal-by-contribution (contribution-id uint))
+  (match (map-get? contribution-appeal-lookup { contribution-id: contribution-id })
+    lookup-data (map-get? contribution-appeals { appeal-id: (get appeal-id lookup-data) })
+    none
+  )
+)
+
+(define-read-only (has-pending-appeal (contribution-id uint))
+  (match (map-get? contribution-appeal-lookup { contribution-id: contribution-id })
+    lookup-data
+    (match (map-get? contribution-appeals { appeal-id: (get appeal-id lookup-data) })
+      appeal (not (get resolved appeal))
+      false
+    )
+    false
   )
 )
 
